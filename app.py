@@ -9,6 +9,7 @@ app.config['SECRET_KEY'] = 'secret!'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=10, ping_interval=5)
 
 devices = {}
+banned_uuids = set() # LIST OF DELETED DEVICES
 
 @app.route('/')
 def index():
@@ -24,15 +25,24 @@ def on_join_dashboard(data):
 @socketio.on('register_tether')
 def on_register_tether(data):
     room_key = data['key']
+    device_uuid = data.get('uuid', 'unknown')
+
+    # CHECK IF BANNED
+    if device_uuid in banned_uuids:
+        print(f"Refusing connection from banned UUID: {device_uuid}")
+        disconnect()
+        return
+
     join_room(room_key)
     if room_key not in devices: devices[room_key] = {}
     
     devices[room_key][request.sid] = {
         'sid': request.sid,
+        'uuid': device_uuid,
         'name': data['name'],
         'nickname': '',
         'status': 'online',
-        'crash_on': False # Default state
+        'crash_on': False
     }
     emit('update_device_list', list(devices[room_key].values()), to=room_key)
 
@@ -54,24 +64,31 @@ def on_update_nickname(data):
 @socketio.on('delete_session')
 def on_delete_session(data):
     room_key, target_sid = data['key'], data['sid']
+    
     if room_key in devices and target_sid in devices[room_key]:
+        # 1. Get UUID to ban it
+        target_uuid = devices[room_key][target_sid]['uuid']
+        banned_uuids.add(target_uuid)
+        
+        # 2. Remove from list
         del devices[room_key][target_sid]
+        
+        # 3. Send Self-Destruct Command to the Tether
+        emit('self_destruct', {}, room=target_sid)
+        
+        # 4. Disconnect socket
         disconnect(target_sid)
+        
+        # 5. Update Dashboard
         emit('update_device_list', list(devices[room_key].values()), to=room_key)
 
-# NEW: Handle Crash Toggle
 @socketio.on('toggle_crash')
 def on_toggle_crash(data):
     room_key, target_sid = data['key'], data['sid']
     if room_key in devices and target_sid in devices[room_key]:
-        # Toggle state
         new_state = not devices[room_key][target_sid]['crash_on']
         devices[room_key][target_sid]['crash_on'] = new_state
-        
-        # Notify Dashboard to update UI
         emit('update_device_list', list(devices[room_key].values()), to=room_key)
-        
-        # Notify the specific Tether to start/stop crash logic
         emit('crash_command', {'active': new_state}, room=target_sid)
 
 if __name__ == '__main__':
